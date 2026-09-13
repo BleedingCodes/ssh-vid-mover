@@ -1,226 +1,391 @@
+
+/
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Ssh vid mover · PY
+"""
+ssh_vid_mover.py — SSH camera recording mover.
+ 
+Connects to a remote Linux host over SSH/SFTP, finds video files
+whose names contain any of the strings in VIDEO_NAMES, downloads
+them using a safe .part pattern with size verification, and deletes
+the originals only after a successful transfer.
+ 
+USAGE
+-----
+Run with defaults (edit constants below or use CLI flags):
+    python ssh_vid_mover.py
+ 
+Override at runtime:
+    python ssh_vid_mover.py --target 192.168.1.200 --username pi \
+        --remote /home/pi/recordings --dest /mnt/backup/videos
+ 
+REQUIREMENTS
+------------
+    pip install paramiko
+ 
+SECURITY NOTE
+-------------
+This tool uses RejectPolicy for SSH host-key checking. The remote
+host must already be in your ~/.ssh/known_hosts before first use.
+To add it:
+    ssh-keyscan -H <target-ip> >> ~/.ssh/known_hosts
+or connect manually once with the standard ssh client.
+"""
+ 
+import argparse
 import getpass
+import logging
 import os
 import stat
-import paramiko
+import sys
 from pathlib import Path, PurePosixPath
-
+ 
+import paramiko
+ 
 # ---------------------------------------------------------------------------
-# Configuration — edit these before running
+# Defaults — override via CLI flags or edit here.
 # ---------------------------------------------------------------------------
-
-TARGET = "192.168.1.105"          # Remote machine IP or hostname
-USERNAME = "side"                  # SSH username on the remote machine
-REMOTE_FOLDER = "/home/side/Python/Cam_System/recordings/"  # Remote directory to search
-DESTINATION_DIRECTORY = Path("/media/fight/Tb/Downloaded_Recordings")  # Local destination
-
-VIDEO_NAMES = (
+ 
+DEFAULT_TARGET: str = "192.168.1.105"
+DEFAULT_USERNAME: str = "side"
+DEFAULT_REMOTE_FOLDER: str = "/home/side/Python/Cam_System/recordings"
+DEFAULT_DESTINATION: str = "/media/fight/Tb/Downloaded_Recordings"
+ 
+VIDEO_NAMES: tuple[str, ...] = (
     "d-link",
     "amcrestbullet",
 )
-
-# Set to True to print extra trace information for debugging.
-DEBUG = False
-
-
+ 
+# Only files with these extensions are eligible for transfer.
+# Guards against name-matching non-video files that would be deleted.
+VIDEO_EXTENSIONS: tuple[str, ...] = (
+    ".mp4",
+    ".avi",
+    ".mkv",
+    ".mov",
+    ".ts",
+    ".m4v",
+)
+ 
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+ 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(levelname)-8s  %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+log = logging.getLogger(__name__)
+ 
+ 
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+ 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Move camera recordings from a remote host over SSH/SFTP.",
+    )
+    parser.add_argument(
+        "--target",
+        default=DEFAULT_TARGET,
+        help=f"Remote host IP or hostname (default: {DEFAULT_TARGET})",
+    )
+    parser.add_argument(
+        "--username",
+        default=DEFAULT_USERNAME,
+        help=f"SSH username (default: {DEFAULT_USERNAME})",
+    )
+    parser.add_argument(
+        "--remote",
+        default=DEFAULT_REMOTE_FOLDER,
+        help=f"Remote directory to search (default: {DEFAULT_REMOTE_FOLDER})",
+    )
+    parser.add_argument(
+        "--dest",
+        default=DEFAULT_DESTINATION,
+        help=f"Local destination directory (default: {DEFAULT_DESTINATION})",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=22,
+        help="SSH port (default: 22)",
+    )
+    return parser.parse_args()
+ 
+ 
 # ---------------------------------------------------------------------------
 # remote_walk
 # ---------------------------------------------------------------------------
-
+ 
 def remote_walk(sftp: paramiko.SFTPClient, remote_directory: str):
     """
-    Recursively walk a directory on the remote host.
-    Yields full remote file paths as strings.
+    Recursively walk a remote directory over SFTP.
+    Yields full remote file paths (strings) for regular files only.
     """
-    if DEBUG:
-        print(f"[DEBUG] Walking: {remote_directory}")
-
-    for item in sftp.listdir_attr(remote_directory):
-        remote_path = str(PurePosixPath(remote_directory) / item.filename)
-
+    try:
+        entries = sftp.listdir_attr(remote_directory)
+    except IOError as exc:
+        log.warning("Cannot list directory %s: %s", remote_directory, exc)
+        return
+ 
+    for item in entries:
+        remote_path = str(
+            PurePosixPath(remote_directory) / item.filename
+        )
         if stat.S_ISDIR(item.st_mode):
             yield from remote_walk(sftp, remote_path)
         elif stat.S_ISREG(item.st_mode):
             yield remote_path
-
-
+ 
+ 
 # ---------------------------------------------------------------------------
 # create_transfer_list
 # ---------------------------------------------------------------------------
-
-def create_transfer_list(sftp: paramiko.SFTPClient) -> list[str]:
+ 
+def create_transfer_list(
+    sftp: paramiko.SFTPClient,
+    remote_folder: str,
+) -> list[str]:
     """
-    Walk REMOTE_FOLDER and return a list of remote file paths whose
-    filenames contain one of the substrings in VIDEO_NAMES (case-insensitive).
+    Search the remote host and return paths of files whose names contain
+    one of the VIDEO_NAMES substrings AND whose extension is in
+    VIDEO_EXTENSIONS.
     """
+    log.info("Scanning remote directory: %s", remote_folder)
+ 
     transfer_list: list[str] = []
     names_lower = [name.lower() for name in VIDEO_NAMES]
-
-    for remote_file in remote_walk(sftp, REMOTE_FOLDER):
+ 
+    for remote_file in remote_walk(sftp, remote_folder):
         remote_path = PurePosixPath(remote_file)
         filename_lower = remote_path.name.lower()
-
-        if any(name in filename_lower for name in names_lower):
+        extension_lower = remote_path.suffix.lower()
+ 
+        name_matches = any(name in filename_lower for name in names_lower)
+        extension_matches = extension_lower in VIDEO_EXTENSIONS
+ 
+        if name_matches and extension_matches:
             transfer_list.append(remote_file)
-
+ 
+    log.info("Found %d matching file(s).", len(transfer_list))
     return transfer_list
-
-
+ 
+ 
 # ---------------------------------------------------------------------------
 # download_and_remove_files
 # ---------------------------------------------------------------------------
-
+ 
 def download_and_remove_files(
     sftp: paramiko.SFTPClient,
     transfer_list: list[str],
+    remote_folder: str,
+    destination: Path,
 ) -> None:
     """
-    Download each remote video to DESTINATION_DIRECTORY, preserving the
-    remote directory structure relative to REMOTE_FOLDER.
-
-    Transfer sequence for each file:
-        1. Download → .part temporary file
-        2. Verify local size == remote size
-        3. Rename .part → final filename
-        4. Delete remote original
-
-    On any failure the remote file is left untouched and the .part file
-    is removed. The script continues to the next file.
+    Download each remote video to the local destination using a safe
+    .part pattern. The remote file is deleted only after the download
+    passes size verification. The original directory structure is preserved.
     """
-    DESTINATION_DIRECTORY.mkdir(parents=True, exist_ok=True)
-
+    destination.mkdir(parents=True, exist_ok=True)
+ 
     transferred = 0
     failed = 0
-
+ 
     for remote_file in transfer_list:
         remote_path = PurePosixPath(remote_file)
-        relative_path = remote_path.relative_to(PurePosixPath(REMOTE_FOLDER))
-        local_path = DESTINATION_DIRECTORY / Path(*relative_path.parts)
+        relative_path = remote_path.relative_to(PurePosixPath(remote_folder))
+        local_path = destination / Path(*relative_path.parts)
         local_path.parent.mkdir(parents=True, exist_ok=True)
         temporary_path = Path(f"{local_path}.part")
-
-        print()
-        print(f"Target: {remote_file}")
-        print(f"Host:   {local_path}")
-
+ 
+        log.info("  Remote : %s", remote_file)
+        log.info("  Local  : %s", local_path)
+ 
         try:
-            # Step 1 — download to .part file
+            # Capture remote size BEFORE starting the download.
+            # If the recording process is still writing, we detect the
+            # mismatch and do not delete the source.
+            remote_size = sftp.stat(remote_file).st_size
+ 
             sftp.get(remote_file, str(temporary_path))
-
-            # Step 2 — confirm the file was created locally
+ 
             if not temporary_path.exists():
                 raise RuntimeError("Temporary download file was not created.")
-
-            # Step 3 — verify size
-            remote_size = sftp.stat(remote_file).st_size
+ 
             local_size = temporary_path.stat().st_size
-
+ 
             if local_size != remote_size:
                 raise RuntimeError(
                     f"Size mismatch: remote={remote_size} bytes, "
-                    f"local={local_size} bytes"
+                    f"local={local_size} bytes."
                 )
-
-            # Step 4 — finalize
+ 
             os.replace(temporary_path, local_path)
-
-            # Step 5 — delete remote original
             sftp.remove(remote_file)
-
+ 
             transferred += 1
-            print("Moved successfully.")
-
-        except Exception as error:
+            log.info("  Status : moved successfully.\n")
+ 
+        except Exception as exc:
             failed += 1
-            print(f"Transfer failed: {error}")
-            print("Remote file was not deleted.")
-
+            log.error("  Status : transfer failed — %s", exc)
+            log.error("           Source file was NOT deleted.\n")
             if temporary_path.exists():
                 temporary_path.unlink()
-
-    print()
-    print("----------------------------------------")
-    print(f"Successfully moved: {transferred}")
-    print(f"Failed:             {failed}")
-    print("----------------------------------------")
-
-
+ 
+    log.info("=" * 46)
+    log.info("  Successfully moved : %d", transferred)
+    log.info("  Failed             : %d", failed)
+    log.info("=" * 46)
+ 
+ 
 # ---------------------------------------------------------------------------
 # connect_to_target
 # ---------------------------------------------------------------------------
-
-def connect_to_target() -> paramiko.SSHClient:
+ 
+def connect_to_target(
+    target: str,
+    username: str,
+    port: int,
+) -> paramiko.SSHClient:
     """
-    Open an SSH connection to TARGET using password authentication.
-
-    Host key policy: AutoAddPolicy is used, which silently accepts new host
-    keys. This is convenient for home-lab use but means the connection is
-    not protected against a first-use MITM attack. If you need stricter
-    security, replace AutoAddPolicy with RejectPolicy and ensure the remote
-    host is already in ~/.ssh/known_hosts before running.
+    Open an SSH connection to the remote host.
+ 
+    Uses RejectPolicy — the remote host key must already be in
+    ~/.ssh/known_hosts. This prevents silent acceptance of unknown
+    or changed host keys, which is important for a tool that deletes
+    source files after transfer.
+ 
+    To add a host to known_hosts:
+        ssh-keyscan -H <target> >> ~/.ssh/known_hosts
     """
     ssh = paramiko.SSHClient()
     ssh.load_system_host_keys()
-    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-
-    password = getpass.getpass(f"SSH password for {USERNAME}@{TARGET}: ")
-
-    ssh.connect(
-        hostname=TARGET,
-        port=22,
-        username=USERNAME,
-        password=password,
-        timeout=20,
-    )
-
+ 
+    # RejectPolicy: refuse connection if the host key is not already
+    # known. Safer than AutoAddPolicy for a destructive transfer tool.
+    ssh.set_missing_host_key_policy(paramiko.RejectPolicy())
+ 
+    password = getpass.getpass(f"SSH password for {username}@{target}: ")
+ 
+    try:
+        ssh.connect(
+            hostname=target,
+            port=port,
+            username=username,
+            password=password,
+            timeout=20,
+        )
+    except paramiko.ssh_exception.NoValidConnectionsError as exc:
+        log.error("Could not connect: %s", exc)
+        sys.exit(1)
+ 
     return ssh
-
-
+ 
+ 
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
-
+ 
 def main() -> None:
-    ssh = None
-    sftp = None
-
+    args = parse_args()
+ 
+    target: str = args.target
+    username: str = args.username
+    remote_folder: str = args.remote.rstrip("/")   # normalise trailing slash
+    destination: Path = Path(args.dest)
+    port: int = args.port
+ 
+    ssh: paramiko.SSHClient | None = None
+    sftp: paramiko.SFTPClient | None = None
+ 
     try:
-        print(f"Connecting to {USERNAME}@{TARGET}...")
-
-        ssh = connect_to_target()
+        log.info("Connecting to %s@%s:%d ...", username, target, port)
+        ssh = connect_to_target(target, username, port)
         sftp = ssh.open_sftp()
-
-        print(f"\nSearching target directory:\n{REMOTE_FOLDER}\n")
-
-        transfer_list = create_transfer_list(sftp)
-
+ 
+        transfer_list = create_transfer_list(sftp, remote_folder)
+ 
         if not transfer_list:
-            print("No matching videos were found.")
+            log.info("No matching videos found. Nothing to do.")
             return
-
-        print(f"Found {len(transfer_list)} matching video(s):")
-        for remote_file in transfer_list:
-            print(f"  {remote_file}")
-
-        download_and_remove_files(sftp, transfer_list)
-
+ 
+        log.info("Files queued for transfer:")
+        for f in transfer_list:
+            log.info("  %s", f)
+ 
+        download_and_remove_files(sftp, transfer_list, remote_folder, destination)
+ 
     except paramiko.AuthenticationException:
-        print("SSH authentication failed.")
-
-    except paramiko.SSHException as error:
-        print(f"SSH error: {error}")
-
-    except FileNotFoundError as error:
-        print(f"Directory or file not found: {error}")
-
-    except Exception as error:
-        print(f"Unexpected error: {error}")
-
+        log.error("SSH authentication failed.")
+        sys.exit(1)
+ 
+    except paramiko.SSHException as exc:
+        log.error("SSH error: %s", exc)
+        sys.exit(1)
+ 
+    except FileNotFoundError as exc:
+        log.error("Directory or file not found: %s", exc)
+        sys.exit(1)
+ 
+    except Exception as exc:
+        log.error("Unexpected error: %s", exc)
+        sys.exit(1)
+ 
     finally:
         if sftp is not None:
             sftp.close()
         if ssh is not None:
             ssh.close()
-
-
+        log.info("Connection closed.")
+ 
+ 
 if __name__ == "__main__":
     main()
+ 
+
+
+
+
+
+
