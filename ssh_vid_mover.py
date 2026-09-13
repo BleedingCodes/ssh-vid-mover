@@ -1,44 +1,4 @@
 
-/
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-Ssh vid mover · PY
 """
 ssh_vid_mover.py — SSH camera recording mover.
  
