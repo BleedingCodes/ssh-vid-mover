@@ -5,7 +5,7 @@ machine over SSH and moving them to local storage — safely.
 
 Files are downloaded to a `.part` temporary file first. The remote original is
 only deleted after the local size is verified against the remote size. A failed
-transfer leaves the remote file untouched.
+or interrupted transfer leaves the remote file untouched.
 
 ---
 
@@ -17,7 +17,7 @@ transfer leaves the remote file untouched.
 - Downloads matching files to local storage, preserving the remote directory structure
 - Verifies local file size matches remote file size before finalizing
 - Deletes the remote original only after a verified successful download
-- Cleans up incomplete `.part` files on failure
+- Cleans up incomplete `.part` files on failure or interrupt
 - Prints a transfer summary on completion
 
 ---
@@ -42,7 +42,7 @@ which generates the recordings this script moves.
 - `paramiko` — SSH client library
 
 ```bash
-pip install paramiko
+pip install -r requirements.txt
 ```
 
 - SSH access to the remote machine (password authentication)
@@ -55,12 +55,12 @@ pip install paramiko
 Edit the constants at the top of `ssh_vid_mover.py` before running:
 
 ```python
-TARGET = "192.168.1.105"          # Remote machine IP or hostname
-USERNAME = "side"                  # SSH username on the remote machine
-REMOTE_FOLDER = "/home/side/Python/Cam_System/recordings/"  # Remote directory to search
-DESTINATION_DIRECTORY = Path("/media/fight/Tb/Downloaded_Recordings")  # Local destination
+DEFAULT_TARGET: str = "192.168.1.105"          # Remote machine IP or hostname
+DEFAULT_USERNAME: str = "side"                  # SSH username on the remote machine
+DEFAULT_REMOTE_FOLDER: str = "/home/side/Python/Cam_System/recordings"  # Remote directory to search
+DEFAULT_DESTINATION: str = "/media/fight/Tb/Downloaded_Recordings"      # Local destination
 
-VIDEO_NAMES = (
+VIDEO_NAMES: tuple[str, ...] = (
     "d-link",
     "amcrestbullet",
 )
@@ -80,12 +80,25 @@ python3 ssh_vid_mover.py
 
 The script will:
 
-1. Prompt for the SSH password for `USERNAME@TARGET`
-2. Walk `REMOTE_FOLDER` recursively
+1. Prompt for the SSH password for `DEFAULT_USERNAME@DEFAULT_TARGET`
+2. Walk `DEFAULT_REMOTE_FOLDER` recursively
 3. Print every file it finds that matches `VIDEO_NAMES`
-4. Download each matched file to `DESTINATION_DIRECTORY`, preserving subdirectory structure
+4. Download each matched file to `DEFAULT_DESTINATION`, preserving subdirectory structure
 5. Verify size, finalize the download, delete the remote original
 6. Print a summary: files moved successfully, files failed
+
+**Override defaults at runtime without editing the script:**
+
+```bash
+python3 ssh_vid_mover.py \
+    --target 192.168.1.200 \
+    --username pi \
+    --remote /home/pi/recordings \
+    --dest /mnt/backup/videos \
+    --port 22
+```
+
+All flags are optional. Any flag not provided falls back to the constant defaults at the top of the script.
 
 ---
 
@@ -103,34 +116,33 @@ Rename .part → final filename
 Delete remote original
 ```
 
-If any step fails, the remote file is not deleted and the `.part` file is
-removed. The script continues to the next file rather than stopping.
+If any step fails — including a Ctrl-C interrupt — the remote file is not deleted
+and the `.part` file is removed. The script continues to the next file rather
+than stopping on error.
 
 ---
 
 ## Example Output
 
 ```
-Connecting to side@192.168.1.105...
-
-Searching target directory:
-/home/side/Python/Cam_System/recordings/
-
-Found 3 matching video(s):
-  /home/side/Python/Cam_System/recordings/2026-07-10/d-link_14-53-05.mp4
-  /home/side/Python/Cam_System/recordings/2026-07-10/amcrestbullet_14-53-06.mp4
-  /home/side/Python/Cam_System/recordings/2026-07-11/d-link_09-12-44.mp4
-
-Target: /home/side/Python/Cam_System/recordings/2026-07-10/d-link_14-53-05.mp4
-Host:   /media/fight/Tb/Downloaded_Recordings/2026-07-10/d-link_14-53-05.mp4
-Moved successfully.
+2026-07-10 14:53:00  INFO      Connecting to side@192.168.1.105:22 ...
+2026-07-10 14:53:01  INFO      Scanning remote directory: /home/side/Python/Cam_System/recordings
+2026-07-10 14:53:01  INFO      Found 3 matching file(s).
+2026-07-10 14:53:01  INFO      Files queued for transfer:
+2026-07-10 14:53:01  INFO        /home/side/Python/Cam_System/recordings/2026-07-10/d-link_14-53-05.mp4
+2026-07-10 14:53:01  INFO        /home/side/Python/Cam_System/recordings/2026-07-10/amcrestbullet_14-53-06.mp4
+2026-07-10 14:53:01  INFO        /home/side/Python/Cam_System/recordings/2026-07-11/d-link_09-12-44.mp4
+2026-07-10 14:53:01  INFO        Remote : /home/side/Python/Cam_System/recordings/2026-07-10/d-link_14-53-05.mp4
+2026-07-10 14:53:01  INFO        Local  : /media/fight/Tb/Downloaded_Recordings/2026-07-10/d-link_14-53-05.mp4
+2026-07-10 14:53-04  INFO        Status : moved successfully.
 
 ...
 
-----------------------------------------
-Successfully moved: 3
-Failed:             0
-----------------------------------------
+2026-07-10 14:53:10  INFO      ==============================================
+2026-07-10 14:53:10  INFO        Successfully moved : 3
+2026-07-10 14:53:10  INFO        Failed             : 0
+2026-07-10 14:53:10  INFO      ==============================================
+2026-07-10 14:53:10  INFO      Connection closed.
 ```
 
 ---
