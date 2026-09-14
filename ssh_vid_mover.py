@@ -185,6 +185,9 @@ def download_and_remove_files(
     Download each remote video to the local destination using a safe
     .part pattern. The remote file is deleted only after the download
     passes size verification. The original directory structure is preserved.
+
+    If a KeyboardInterrupt occurs mid-download, the .part file is cleaned
+    up and the interrupt is re-raised so the caller can exit cleanly.
     """
     destination.mkdir(parents=True, exist_ok=True)
  
@@ -197,6 +200,17 @@ def download_and_remove_files(
         local_path = destination / Path(*relative_path.parts)
         local_path.parent.mkdir(parents=True, exist_ok=True)
         temporary_path = Path(f"{local_path}.part")
+
+        # FIX (Bug 2): Warn if the local file already exists. This means
+        # a previous run transferred the file but failed to delete the remote
+        # original. The file will be re-downloaded and the local copy overwritten.
+        # The overwrite is safe (size verification still runs), but surfacing it
+        # lets the operator know the remote was not cleaned up previously.
+        if local_path.exists():
+            log.warning(
+                "  WARNING: Local file already exists — will overwrite: %s",
+                local_path,
+            )
  
         log.info("  Remote : %s", remote_file)
         log.info("  Local  : %s", local_path)
@@ -225,6 +239,16 @@ def download_and_remove_files(
  
             transferred += 1
             log.info("  Status : moved successfully.\n")
+
+        # FIX (Bug 1): Catch KeyboardInterrupt explicitly so .part cleanup
+        # runs on Ctrl-C. Re-raise after cleanup so main() can exit cleanly.
+        except KeyboardInterrupt:
+            failed += 1
+            log.warning("  Status : interrupted by user.")
+            log.warning("           Source file was NOT deleted.\n")
+            if temporary_path.exists():
+                temporary_path.unlink()
+            raise
  
         except Exception as exc:
             failed += 1
@@ -315,7 +339,11 @@ def main() -> None:
             log.info("  %s", f)
  
         download_and_remove_files(sftp, transfer_list, remote_folder, destination)
- 
+
+    except KeyboardInterrupt:
+        log.warning("Interrupted by user.")
+        sys.exit(1)
+
     except paramiko.AuthenticationException:
         log.error("SSH authentication failed.")
         sys.exit(1)
@@ -342,10 +370,3 @@ def main() -> None:
  
 if __name__ == "__main__":
     main()
- 
-
-
-
-
-
-
